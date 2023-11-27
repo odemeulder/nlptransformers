@@ -98,14 +98,35 @@ def DotProductAttention(query, key, value, mask):
     attention = jnp.matmul(dots, value)
     return attention
 
-def compute_attention_heads_closure(n_heads, d_head):
-    """ Function that simulates environment inside CausalAttention function.
+def dot_product_self_attention(q, k, v):
+    """ Masked dot product self attention.
     Args:
-        d_head (int):  dimensionality of heads
-        n_heads (int): number of attention heads
+        q (jax.interpreters.xla.DeviceArray): queries.
+        k (jax.interpreters.xla.DeviceArray): keys.
+        v (jax.interpreters.xla.DeviceArray): values.
     Returns:
-        function: compute_attention_heads function
+        jax.interpreters.xla.DeviceArray: masked dot product self attention tensor.
     """
+    mask_size = q.shape[1]
+    # Creates a matrix with ones below the diagonal and 0s above. It should have shape (1, mask_size, mask_size)
+    mask = jnp.tril(jnp.ones((1, mask_size, mask_size),dtype=jnp.bool_), k=0)
+    return DotProductAttention(q, k, v, mask)
+
+def CausalAttention(d_feature, 
+                    n_heads, 
+                    dot_product_self_attention=dot_product_self_attention):
+    """Transformer-style multi-headed causal attention.
+    Args:
+        d_feature (int):  dimensionality of feature embedding.
+        n_heads (int): number of attention heads.
+        dot_product_self_attention (function): dot_product_self_attention function. 
+        mode (str): 'train' or 'eval'.
+
+    Returns:
+        trax.layers.combinators.Serial: Multi-headed self-attention model.
+    """
+    assert d_feature % n_heads == 0
+    d_head = d_feature // n_heads
     def compute_attention_heads(x):
         """ Compute the attention heads.
         Args:
@@ -129,32 +150,7 @@ def compute_attention_heads_closure(n_heads, d_head):
         # n_batch, n_heads, seqlen, d_head -> n_batch*n_heads, seqlen, d_head
         x = jnp.reshape(x, (batch_size * n_heads, seqlen, d_head))
         return x
-    return compute_attention_heads
-
-def dot_product_self_attention(q, k, v):
-    """ Masked dot product self attention.
-    Args:
-        q (jax.interpreters.xla.DeviceArray): queries.
-        k (jax.interpreters.xla.DeviceArray): keys.
-        v (jax.interpreters.xla.DeviceArray): values.
-    Returns:
-        jax.interpreters.xla.DeviceArray: masked dot product self attention tensor.
-    """
-    mask_size = q.shape[1]
-    # Creates a matrix with ones below the diagonal and 0s above. It should have shape (1, mask_size, mask_size)
-    # Notice that 1's and 0's get casted to True/False by setting dtype to jnp.bool_
-    # Use jnp.tril() - Lower triangle of an array and jnp.ones()
-    mask = jnp.tril(jnp.ones((1, mask_size, mask_size),dtype=jnp.bool_), k=0)
-    return DotProductAttention(q, k, v, mask)
-
-def compute_attention_output_closure(n_heads, d_head):
-    """ Function that simulates environment inside CausalAttention function.
-    Args:
-        d_head (int):  dimensionality of heads
-        n_heads (int): number of attention heads
-    Returns:
-        function: compute_attention_output function
-    """
+    ComputeAttentionHeads = tl.Fn('AttnHeads', compute_attention_heads, n_out=1)
     def compute_attention_output(x):
         """ Compute the attention output.
         Args:
@@ -171,29 +167,6 @@ def compute_attention_output_closure(n_heads, d_head):
         # Transpose x using jnp.transpose() to shape (n_batch, seqlen, n_heads, d_head)
         x = jnp.transpose(x, (0, 2, 1, 3))
         return jnp.reshape(x, (-1, seqlen, n_heads * d_head))
-    return compute_attention_output
-
-def CausalAttention(d_feature, 
-                    n_heads, 
-                    compute_attention_heads_closure=compute_attention_heads_closure,
-                    dot_product_self_attention=dot_product_self_attention,
-                    compute_attention_output_closure=compute_attention_output_closure,
-                    mode='train'):
-    """Transformer-style multi-headed causal attention.
-    Args:
-        d_feature (int):  dimensionality of feature embedding.
-        n_heads (int): number of attention heads.
-        compute_attention_heads_closure (function): Closure around compute_attention heads.
-        dot_product_self_attention (function): dot_product_self_attention function. 
-        compute_attention_output_closure (function): Closure around compute_attention_output. 
-        mode (str): 'train' or 'eval'.
-
-    Returns:
-        trax.layers.combinators.Serial: Multi-headed self-attention model.
-    """
-    assert d_feature % n_heads == 0
-    d_head = d_feature // n_heads
-    ComputeAttentionHeads = tl.Fn('AttnHeads', compute_attention_heads_closure(n_heads, d_head), n_out=1)
     return tl.Serial(
         tl.Branch( # creates three towers for one input, takes activations and creates queries keys and values
             [tl.Dense(d_feature), ComputeAttentionHeads], # queries
@@ -201,7 +174,7 @@ def CausalAttention(d_feature,
             [tl.Dense(d_feature), ComputeAttentionHeads], # values
         ),
         tl.Fn('DotProductAttn', dot_product_self_attention, n_out=1), # takes QKV
-        tl.Fn('AttnOutput', compute_attention_output_closure(n_heads, d_head), n_out=1), # to allow for parallel
+        tl.Fn('AttnOutput', compute_attention_output, n_out=1), # to allow for parallel
         tl.Dense(d_feature)
     )
 
@@ -220,38 +193,24 @@ def DecoderBlock(d_model, d_ff, n_heads,
         list: list of trax.layers.combinators.Serial that maps an activation tensor to an activation tensor.
     """
     # Create masked multi-head attention block using CausalAttention function
-    causal_attention = CausalAttention( 
-                        d_model,
-                        n_heads=n_heads,
-                        mode=mode
-                        )
+    causal_attention = CausalAttention( d_model, n_heads=n_heads, mode=mode )
     # Create feed-forward block (list) with two dense layers with dropout and input normalized
     feed_forward = [ 
-        # Normalize layer inputs
         tl.LayerNorm(),
-        # Add first feed forward (dense) layer (don't forget to set the correct value for n_units)
         tl.Dense(n_units=d_ff),
-        # Add activation function passed in as a parameter (you need to call it!)
         ff_activation(), # Generally ReLU
-        # Add dropout with rate and mode specified (i.e., don't use dropout during evaluation)
         tl.Dropout(rate=dropout, mode=mode),
-        # Add second feed forward layer (don't forget to set the correct value for n_units)
         tl.Dense(n_units=d_model),
-        # Add dropout with rate and mode specified (i.e., don't use dropout during evaluation)
         tl.Dropout(rate=dropout, mode=mode)
     ]
     # Add list of two Residual blocks: the attention with normalization and dropout and feed-forward blocks
     return [
       tl.Residual(
-          # Normalize layer input
           tl.LayerNorm(),
-          # Add causal attention block previously defined (without parentheses)
           causal_attention,
-          # Add dropout with rate and mode specified
           tl.Dropout(rate=dropout, mode=mode)
         ),
       tl.Residual(
-          # Add feed forward block (without parentheses)
           feed_forward
         ),
       ]
@@ -284,29 +243,19 @@ def TransformerLM(vocab_size=33300,
     """
     # Embedding inputs and positional encoder
     positional_encoder = [ 
-        # Add embedding layer of dimension (vocab_size, d_model)
         tl.Embedding(vocab_size, d_model),
-        # Use dropout with rate and mode specified
         tl.Dropout(rate=dropout, mode=mode),
-        # Add positional encoding layer with maximum input length and mode specified
         tl.PositionalEncoding(max_len=max_len, mode=mode)]
     # Create stack (list) of decoder blocks with n_layers with necessary parameters
     decoder_blocks = [ 
         DecoderBlock(d_model, d_ff, n_heads, dropout, mode, ff_activation) for _ in range(n_layers)]
     # Create the complete model as written in the figure
     return tl.Serial(
-        # Use teacher forcing (feed output of previous step to current step)
-        tl.ShiftRight(mode=mode), # Specify the mode!
-        # Add positional encoder
+        tl.ShiftRight(mode=mode), # teacher forcing (feed output of previous step to current step)
         positional_encoder,
-        # Add decoder blocks
         decoder_blocks,
-        # Normalize layer
         tl.LayerNorm(),
-        # Add dense layer of vocab_size (since need to select a word to translate to)
-        # (a.k.a., logits layer. Note: activation already set by ff_activation)
         tl.Dense(n_units=vocab_size),
-        # Get probabilities with Logsoftmax
         tl.LogSoftmax()
     )
 

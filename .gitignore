@@ -1,5 +1,10 @@
 terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
 bin/
 lib/
 share/
 include/
+
+model.pkl.gz
+model.weights.npy.gz

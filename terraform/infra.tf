@@ -62,7 +62,7 @@ resource "aws_instance" "dl" {
   ami           = "ami-03a3697fb8fa1cc70"
   instance_type = "p3.2xlarge"
   iam_instance_profile = "${aws_iam_instance_profile.dl_profile.name}"
-  key_name = "olivier"
+  key_name = "olivier-ed"
   vpc_security_group_ids = [ "${aws_security_group.dl_sg.id}" ]
   user_data = base64encode(file("${path.module}/user_data.sh"))
 

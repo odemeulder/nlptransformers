@@ -10,7 +10,7 @@ touch /home/ec2-user/.ssh/known_hosts
 if ! grep -q "^github.com" /home/ec2-user/.ssh/known_hosts; then
      ssh-keyscan -t rsa -p 443 ssh.github.com >> /home/ec2-user/.ssh/known_hosts
 fi
-cat > /home/ec2-user/.ssh/config << EOT
+cat > c << EOT
 Host github.com
 Hostname ssh.github.com
 Port 443

@@ -24,6 +24,4 @@ chmod 0600 /home/ec2-user/.ssh/config
 chmod 0600 /home/ec2-user/.ssh/known_hosts
 
 #Clone the repo
-sudo su ec2-user
-cd ~
-git clone ssh://github.com/odemeulder/nlptransformers
+sudo -u ec2-user git clone ssh://github.com/odemeulder/nlptransformers /home/ec2-user/.

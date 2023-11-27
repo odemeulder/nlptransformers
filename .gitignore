@@ -5,6 +5,7 @@ bin/
 lib/
 share/
 include/
+__pycache__/
 
 model.pkl.gz
 model.weights.npy.gz

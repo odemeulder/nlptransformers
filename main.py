@@ -14,4 +14,4 @@ examples = [
 
 for sentence in examples: 
     print(wrapper.fill(sentence), '\n')
-    print(summarizer.greedy_decode(sentence, summarizer.model), '\n')
+    print(summarizer.summarize(sentence, mode='mbr'), '\n')

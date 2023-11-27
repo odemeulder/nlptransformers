@@ -6,6 +6,7 @@ wrapper = textwrap.TextWrapper(width=70)
 import trax
 from trax import layers as tl
 from trax.fastmath import numpy as jnp
+from collections import Counter
 
 def tokenize(input_str, EOS=1):
     """Input str to features dict, ready for inference"""
@@ -21,15 +22,17 @@ def detokenize(integers):
                              vocab_file='summarize32k.subword.subwords')
     return wrapper.fill(s)
 
-def next_symbol(cur_output_tokens, model):
+def next_symbol(cur_output_tokens, model, temperature):
     """Returns the next symbol for a given sentence.
-
     Args:
         cur_output_tokens (list): tokenized sentence with EOS and PAD tokens at the end.
         model (trax.layers.combinators.Serial): The transformer model.
-
+        temperature (float): parameter for sampling ranging from 0.0 to 1.0
+            0.0: same as argmax, always pick the most probable token
+            1.0: sampling from the distribution (can sometimes say random things)
     Returns:
-        int: tokenized symbol.
+        int: tokenized symbol
+        float: log probability of the next symbol
     """
     # current output tokens length
     token_length = len(cur_output_tokens)
@@ -41,15 +44,75 @@ def next_symbol(cur_output_tokens, model):
     # model expects padded tensors (with batch)
     output = model(padded_with_batch)
     log_probs = output[0, token_length, :]
-    return int(np.argmax(log_probs))
+    symbol = int(tl.logsoftmax_sample(log_probs, temperature=temperature))
+    return symbol, float(log_probs[symbol])
+    # return int(np.argmax(log_probs))
+
+
+def rouge1_similarity(system, reference):
+    """ returns the ROUGE-1 score between two token lists
+    Args:
+        system (list of int): tokenized version of the system translation
+        reference (list of int): tokenized version of the reference translation
+    Returns:
+        float: overlap between the two token lists
+    """
+    system_counter = Counter(system)
+    reference_counter = Counter(reference)
+    overlap = 0
+    for token in system_counter:
+        token_count_sys = system_counter.get(token, 0)
+        token_count_ref = reference_counter.get(token, 0)
+        overlap += min(token_count_ref, token_count_sys)
+    precision = overlap / len(system)
+    recall = overlap / len(reference)
+    return 2 * precision * recall / (precision + recall)
+
+def average_overlap(similarity_fn, samples):
+    """ Returns the arithmetic mean of each candidate sentence in the samples
+    Args:
+        similarity_fn (function): similarity function to compute the overlap
+        samples (list of lists of int): tokenized version of the transalated sentences
+    Returns:
+        dict: scores of each sample
+            key: index of the sample
+            value: score of the sample
+    """
+    scores = {}
+    for index_candidate, candidate in enumerate(samples):
+        overlap = 0
+        for index_sample, sample in enumerate(samples):
+            if index_sample == index_candidate:
+                continue
+            overlap += similarity_fn(sample, candidate)
+        scores[index_candidate] = overlap / (len(samples) - 1)
+    return scores
+
+def mbr_decode(sentence, n_samples, NMTAttn=None, temperature=0.6):
+    """Returns the translated sentence using Minimum Bayes Risk decoding
+    Args:
+        sentence (str): sentence to translate.
+        n_samples (int): number of samples to generate
+        NMTAttn (tl.Serial): An LSTM sequence-to-sequence model with attention.
+        temperature (float): parameter for sampling ranging from 0.0 to 1.0.
+            0.0: same as argmax, always pick the most probable token
+            1.0: sampling from the distribution (can sometimes say random things)
+        vocab_file (str): filename of the vocabulary
+        vocab_dir (str): path to the vocabulary file
+    Returns:
+        str: the translated sentence
+    """
+    samples, log_probs = generate_samples(sentence, n_samples, NMTAttn, temperature)
+    scores = average_overlap(rouge1_similarity, samples, log_probs)
+    max_score_key = max(scores, key=scores.get)
+    translated_sentence = detokenize(samples[max_score_key])
+    return translated_sentence
 
 def greedy_decode(input_sentence, model, next_symbol=next_symbol, tokenize=tokenize, detokenize=detokenize):
     """Greedy decode function.
-
     Args:
         input_sentence (string): a sentence or article.
         model (trax.layers.combinators.Serial): Transformer model.
-
     Returns:
         string: summary of the input.
     """
@@ -58,13 +121,36 @@ def greedy_decode(input_sentence, model, next_symbol=next_symbol, tokenize=token
     cur_output = 0 
     EOS = 1 
     while cur_output != EOS:
-        # Get next symbol
-        cur_output = next_symbol(cur_output_tokens, model)
-        # Append next symbol to original sentence
+        cur_output, _ = next_symbol(cur_output_tokens, model, 0.0)
         cur_output_tokens.append(cur_output)
-        # Append next symbol to generated sentence
         generated_output.append(cur_output)
     return detokenize(generated_output)
+
+def sampling_decode(input_sentence, NMTAttn=None, temperature=0.0):
+    """Returns the translated sentence.
+    Args:
+        input_sentence (str): sentence to translate.
+        NMTAttn (tl.Serial): An LSTM sequence-to-sequence model with attention.
+        temperature (float): parameter for sampling ranging from 0.0 to 1.0.
+            0.0: same as argmax, always pick the most probable token
+            1.0: sampling from the distribution (can sometimes say random things)
+        vocab_file (str): filename of the vocabulary
+        vocab_dir (str): path to the vocabulary file
+    Returns:
+        tuple: (list, str, float)
+            list of int: tokenized version of the translated sentence
+            float: log probability of the translated sentence
+            str: the translated sentence
+    """
+    input_tokens = tokenize(input_sentence)
+    curr_output_tokens = []
+    cur_output = 0
+    EOS = 1
+    while cur_output != EOS:
+        cur_output, log_prob = next_symbol(input_tokens, NMTAttn, temperature)
+        curr_output_tokens.append(cur_output)
+    sentence = detokenize(curr_output_tokens)
+    return curr_output_tokens, log_prob, sentence
 
 def DotProductAttention(query, key, value, mask):
     """Dot product self-attention.
@@ -259,9 +345,42 @@ def TransformerLM(vocab_size=33300,
         tl.LogSoftmax()
     )
 
+def generate_samples(sentence, n_samples, NMTAttn=None, temperature=0.6):
+    """Generates samples using sampling_decode()
+    Args:
+        sentence (str): sentence to translate.
+        n_samples (int): number of samples to generate
+        NMTAttn (tl.Serial): An LSTM sequence-to-sequence model with attention.
+        temperature (float): parameter for sampling ranging from 0.0 to 1.0.
+            0.0: same as argmax, always pick the most probable token
+            1.0: sampling from the distribution (can sometimes say random things)
+    Returns:
+        tuple: (list, list)
+            list of lists: token list per sample
+            list of floats: log probability per sample
+    """
+    samples, log_probs = [], []
+    for _ in range(n_samples):
+        sample, logp, _ = sampling_decode(sentence, NMTAttn, temperature)
+        samples.append(sample)
+        log_probs.append(logp)
+    return samples, log_probs
+
 model = TransformerLM(mode='eval')
 
 def initialize():
     # Load the pre-trained weights
     model.init_from_file('model.pkl.gz', weights_only=True)
 
+def summarize(article, mode='greedy'):
+    """ Summarizes article
+    Args:
+        article (string): article to summarize
+        mode: "greedy" (default) or "mbr" 
+    Returns:
+        summary (string)
+    """
+    if mode == "mbr":
+        return mbr_decode(article, 4, model)
+    else:
+        return greedy_decode(article, model)

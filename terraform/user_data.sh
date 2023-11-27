@@ -25,3 +25,6 @@ chmod 0600 /home/ec2-user/.ssh/known_hosts
 
 #Clone the repo
 sudo -u ec2-user git clone ssh://github.com/odemeulder/nlptransformers /home/ec2-user/.
+sudo -u ec2-user pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+sudo -u ec2-user pip install -r /home/ec2-user/nlptransformers/requirements.txt
+

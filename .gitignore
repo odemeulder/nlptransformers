@@ -1,0 +1,5 @@
+terraform/.terraform/
+bin/
+lib/
+share/
+include/

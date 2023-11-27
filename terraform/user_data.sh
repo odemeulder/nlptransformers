@@ -10,7 +10,7 @@ touch /home/ec2-user/.ssh/known_hosts
 if ! grep -q "^github.com" /home/ec2-user/.ssh/known_hosts; then
      ssh-keyscan -t rsa -p 443 ssh.github.com >> /home/ec2-user/.ssh/known_hosts
 fi
-cat > c << EOT
+cat > /home/ec2-user/.ssh/config << EOT
 Host github.com
 Hostname ssh.github.com
 Port 443
@@ -24,7 +24,7 @@ chmod 0600 /home/ec2-user/.ssh/config
 chmod 0600 /home/ec2-user/.ssh/known_hosts
 
 #Clone the repo
-sudo -u ec2-user git clone ssh://github.com/odemeulder/nlptransformers /home/ec2-user/.
-sudo -u ec2-user pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-sudo -u ec2-user pip install -r /home/ec2-user/nlptransformers/requirements.txt
+sudo -u ec2-user git clone ssh://github.com/odemeulder/nlptransformers /home/ec2-user/nlptransformers
+su ec2-user -c 'pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html'
+su ec2-user -c 'pip install -r /home/ec2-user/nlptransformers/requirements.txt'
 
